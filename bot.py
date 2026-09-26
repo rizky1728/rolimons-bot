@@ -575,4 +575,101 @@ async def deals_cmd(interaction):
         return
     e = discord.Embed(title="💸 Deals", color=0xFFD700)
     e.description = "\n".join(
-        f"• **{x.get('name', '?')}
+        f"• **{x.get('name', '?')}** — 💰 {fmt(x.get('value'))} · 💵 {fmt(x.get('price'))}"
+        for x in d["deals"][:10]
+    )
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="top", description="Top items by value")
+async def top_cmd(interaction, jumlah: int = 10):
+    await interaction.response.defer()
+    jumlah = max(1, min(jumlah, 25))
+    if not api._items_meta:
+        await api.load_items_index()
+    items = sorted(api._items_meta.values(), key=lambda x: x.get("value") or 0, reverse=True)[:jumlah]
+    e = discord.Embed(title=f"🏆 Top {jumlah}", color=0xFFD700)
+    e.description = "\n".join(f"`{i+1:>2}.` **{it['name']}** — 💰 {fmt(it.get('value'))}" for i, it in enumerate(items))
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="calc", description="Kalkulator trade")
+async def calc_cmd(interaction, give: str, receive: str):
+    await interaction.response.defer()
+    if not api._items_index:
+        await api.load_items_index()
+
+    async def resolve(s):
+        total = 0
+        lines = []
+        for n in [x.strip() for x in s.split(",") if x.strip()]:
+            m = await api.search_items(n, limit=1)
+            if not m:
+                lines.append(f"• ❌ {n}")
+                continue
+            v = m[0].get("value") or 0
+            total += v
+            lines.append(f"• {m[0]['name']} — 💰 {fmt(v)}")
+        return total, lines
+
+    gt, gl = await resolve(give)
+    rt, rl = await resolve(receive)
+    diff = rt - gt
+    e = discord.Embed(title="🧮 Trade Calculator", color=0x9B59B6)
+    e.add_field(name="📤 Kasih", value="\n".join(gl) + f"\n**{fmt(gt)}**", inline=False)
+    e.add_field(name="📥 Terima", value="\n".join(rl) + f"\n**{fmt(rt)}**", inline=False)
+    e.add_field(name="📊 Selisih", value=f"**{fmt(diff)}** {'✅' if diff > 0 else ('❌' if diff < 0 else '➡️')}", inline=False)
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="status", description="Status bot")
+async def status_cmd(interaction):
+    await interaction.response.defer()
+    e = discord.Embed(title="🤖 Bot Status", color=0x00A8FF)
+    e.add_field(name="Guilds", value=str(len(bot.guilds)), inline=True)
+    e.add_field(name="Items indexed", value=str(len(api._items_index)), inline=True)
+    e.add_field(name="Items seen", value=str(await db.count_seen()), inline=True)
+    e.add_field(name="Subs", value=str(len(await db.list_newitem_subs())), inline=True)
+    e.add_field(name="Watches", value=str(len(await db.list_watches())), inline=True)
+    e.add_field(name="Poll", value="60s", inline=True)
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="help", description="Daftar command")
+async def help_cmd(interaction):
+    e = discord.Embed(title="📖 Rolimons Bot", color=0x00A8FF)
+    e.add_field(name="🔍 Item", value="`/cari` `/item` `/price` `/top`", inline=False)
+    e.add_field(name="👤 Player", value="`/player`", inline=False)
+    e.add_field(name="💸 Market", value="`/deals`", inline=False)
+    e.add_field(name="🎛️ Panel", value="`/panel` — tombol interaktif", inline=False)
+    e.add_field(name="🧮 Util", value="`/calc` `/status` `/help`", inline=False)
+    e.set_footer(text="Multi-server · SQLite · Webhook")
+    await interaction.response.send_message(embed=e)
+
+
+# ============================================================
+# ERROR
+# ============================================================
+@bot.tree.error
+async def on_error(interaction, error):
+    try:
+        msg = f"❌ `{error}`"
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+    print(f"[ERR] {error}")
+
+
+@bot.event
+async def on_ready():
+    print(f"[OK] {bot.user} | Guilds: {len(bot.guilds)}")
+
+
+if __name__ == "__main__":
+    if not TOKEN:
+        print("[FATAL] DISCORD_TOKEN kosong")
+        exit(1)
+    bot.run(TOKEN)
