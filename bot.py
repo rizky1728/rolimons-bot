@@ -179,7 +179,16 @@ class RolimonsAPI:
 
     async def start(self):
         if not self.session:
-            self.session = aiohttp.ClientSession(headers={"User-Agent": "RolimonsBot/1.0"})
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.rolimons.com/",
+                "Origin": "https://www.rolimons.com",
+            }
+            self.session = aiohttp.ClientSession(headers=headers)
 
     async def close(self):
         if self.session:
@@ -193,14 +202,15 @@ class RolimonsAPI:
             return c
         await self.start()
         try:
-            async with self.session.get(f"{ROLIMONS_BASE}{path}", timeout=15) as r:
+            async with self.session.get(f"{ROLIMONS_BASE}{path}", timeout=20) as r:
                 if r.status != 200:
+                    print(f"[API HTTP {r.status}] {path}")
                     return None
                 data = await r.json()
                 await cache.set(key, data, ttl)
                 return data
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(f"[API ERR] {path}: {e}")
+            print(f"[API ERR] {path}: {type(e).__name__}: {e}")
             return None
 
     async def load_items_index(self):
@@ -208,6 +218,8 @@ class RolimonsAPI:
         if not data:
             return False
         items = data.get("items", [])
+        if not items:
+            return False
         self._items_index.clear()
         self._items_meta.clear()
         self._name_index.clear()
@@ -388,18 +400,43 @@ class RolimonsBot(commands.Bot):
         print("[OK] Ready")
 
     async def _preload(self):
-        ok = await api.load_items_index()
-        print(f"[OK] Items: {len(api._items_index)} (loaded={ok})")
+        """Load items index dengan retry terus sampai berhasil."""
+        for attempt in range(1, 11):
+            ok = await api.load_items_index()
+            if ok and api._items_index:
+                print(f"[OK] Items: {len(api._items_index)} (loaded=True)")
+                break
+            print(f"[RETRY {attempt}/10] Items load gagal, coba lagi 30s...")
+            await asyncio.sleep(30)
+        else:
+            print("[WARN] Items gagal setelah 10x. Retry di background.")
+            asyncio.create_task(self._bg_retry())
+
         count = await db.count_seen()
         if count == 0 and api._items_meta:
             print("[INIT] Seeding seen items...")
             for iid in api._items_meta.keys():
                 await db.mark_seen(iid)
 
+    async def _bg_retry(self):
+        """Background retry tiap 2 menit sampai berhasil."""
+        while not api._items_index:
+            await asyncio.sleep(120)
+            ok = await api.load_items_index()
+            if ok and api._items_index:
+                print(f"[OK] Items loaded (bg): {len(api._items_index)}")
+                count = await db.count_seen()
+                if count == 0:
+                    for iid in api._items_meta.keys():
+                        await db.mark_seen(iid)
+                break
+
     async def _scheduler(self):
         await self.wait_until_ready()
         while not self.is_closed():
             try:
+                if not api._items_index:
+                    await api.load_items_index()
                 await self._check_new()
                 await self._check_watches()
             except Exception as e:
@@ -513,7 +550,7 @@ async def cari_cmd(interaction, query: str):
     await interaction.response.defer()
     r = await api.search_items(query, limit=10)
     if not r:
-        await interaction.followup.send(f"❌ Gak nemu `{query}`.")
+        await interaction.followup.send(f"❌ Gak nemu `{query}`. (Index: {len(api._items_index)} item)")
         return
     e = discord.Embed(title=f"🔍 `{query}`", color=0x00A8FF)
     e.description = "\n".join(f"• **{x['name']}** — 💰 {fmt(x.get('value'))} · RAP {fmt(x.get('rap'))}" for x in r[:10])
@@ -526,7 +563,7 @@ async def item_cmd(interaction, nama: str):
     await interaction.response.defer()
     m = await api.search_items(nama, limit=1)
     if not m:
-        await interaction.followup.send(f"❌ Gak nemu `{nama}`.")
+        await interaction.followup.send(f"❌ Gak nemu `{nama}`. (Index: {len(api._items_index)} item)")
         return
     meta = m[0]
     v = await api.get_item_value(meta["id"])
@@ -540,7 +577,7 @@ async def price_cmd(interaction, nama: str):
     await interaction.response.defer()
     m = await api.search_items(nama, limit=1)
     if not m:
-        await interaction.followup.send(f"❌ Gak nemu `{nama}`.")
+        await interaction.followup.send(f"❌ Gak nemu `{nama}`. (Index: {len(api._items_index)} item)")
         return
     v = await api.get_item_value(m[0]["id"])
     await interaction.followup.send(embed=item_embed(m[0], v))
@@ -571,7 +608,7 @@ async def deals_cmd(interaction):
     await interaction.response.defer()
     d = await api.get_deals()
     if not d or not d.get("deals"):
-        await interaction.followup.send("❌ Gak ada deals.")
+        await interaction.followup.send("❌ Gak ada deals aktif saat ini.")
         return
     e = discord.Embed(title="💸 Deals", color=0xFFD700)
     e.description = "\n".join(
@@ -587,6 +624,9 @@ async def top_cmd(interaction, jumlah: int = 10):
     jumlah = max(1, min(jumlah, 25))
     if not api._items_meta:
         await api.load_items_index()
+    if not api._items_meta:
+        await interaction.followup.send("❌ Index item belum ke-load. Coba lagi bentar.")
+        return
     items = sorted(api._items_meta.values(), key=lambda x: x.get("value") or 0, reverse=True)[:jumlah]
     e = discord.Embed(title=f"🏆 Top {jumlah}", color=0xFFD700)
     e.description = "\n".join(f"`{i+1:>2}.` **{it['name']}** — 💰 {fmt(it.get('value'))}" for i, it in enumerate(items))
@@ -598,6 +638,9 @@ async def calc_cmd(interaction, give: str, receive: str):
     await interaction.response.defer()
     if not api._items_index:
         await api.load_items_index()
+    if not api._items_index:
+        await interaction.followup.send("❌ Index item belum ke-load. Coba lagi bentar.")
+        return
 
     async def resolve(s):
         total = 0
@@ -665,7 +708,7 @@ async def on_error(interaction, error):
 
 @bot.event
 async def on_ready():
-    print(f"[OK] {bot.user} | Guilds: {len(bot.guilds)}")
+    print(f"[OK] {bot.name}#{bot.discriminator} | Guilds: {len(bot.guilds)}")
 
 
 if __name__ == "__main__":
